@@ -1,9 +1,8 @@
 # County Relocation Dashboard
 
-> **Business question:** Which U.S. county is the best fit for me to relocate to?  
-> This pipeline integrates demographics, air quality, and crime data at the **county level**
-> into three Power BI dashboard pages, letting you filter and rank all ~3,000 U.S. counties
-> across the dimensions that matter most to you.
+> **Business question:** Which U.S. city is the best fit for me to relocate to?  
+> This pipeline integrates demographics, air quality, and crime data from free U.S. federal
+> APIs into a Power BI dashboard, letting you compare cities across the dimensions that matter most.
 
 ---
 
@@ -11,10 +10,11 @@
 
 ```
 [Census ACS API]  ──► ingest_census.py ──► data/processed/census.csv ──┐
-[EPA AQS API]     ──► ingest_air.py    ──► data/processed/air.csv    ──┤
-[FBI CDE API]     ──► ingest_crime.py  ──► data/processed/crime.csv  ──┘
+[FBI CDE API]     ──► ingest_crime.py  ──► data/processed/crime.csv  ──┤── city-level (place_fips)
                                                                         │
-                                                          joined on FIPS in Power BI
+[EPA AQS API]     ──► ingest_air.py    ──► data/processed/air.csv    ──┘── county-level (county_fips)
+                                                                        │
+                                                    loaded into Power BI data model
                                                                         │
                                                                         ▼
                                                           Power BI Dashboard (3 pages)
@@ -23,23 +23,23 @@
                                                           └── Crime
 ```
 
-All sources are keyed on **5-digit county FIPS code** (2-digit state + 3-digit county).
-No name-based joins are used — county names are inconsistent and duplicated across states.
-The three CSVs are loaded as separate tables in Power BI and linked via the FIPS key in
-the data model. Heavy transformation logic stays in Python; Power BI handles only the join
-and presentation layer.
+**Join keys:**
+- Census + Crime → joined on `place_fips` (7-digit: 2-digit state + 5-digit Census place code)
+- Air Quality → stands alone on `county_fips` (5-digit county FIPS). City-to-county bridge planned for Stage 2.
+
+Heavy transformation logic stays in Python. Power BI handles presentation only.
 
 ---
 
 ## Data Sources
 
-| Source | Granularity | FIPS mapping |
-|--------|-------------|--------------|
-| **U.S. Census ACS 5-year** | Native county FIPS | Direct — the API returns `state` + `county` fields |
-| **EPA AQS (Air Quality)** | Monitor-level annual summaries | Averaged across all monitors in the county |
-| **FBI Crime Data Explorer** | Police agency (ORI) | Mapped via FBI's agency crosswalk to county FIPS — see data-quality notes |
+| Source | Vintage | Granularity | Key |
+|--------|---------|-------------|-----|
+| **U.S. Census ACS 5-year** | 2024 | City / Census place | `place_fips` |
+| **EPA AQS (Air Quality)** | 2025 | County (monitor aggregated) | `county_fips` |
+| **FBI Crime Data Explorer** | 2025 | City police agency | `place_fips` (matched via city name) |
 
-### Census ACS variables (ACS 5-year, 2022 vintage)
+### Census ACS variables (ACS 5-year, 2024 vintage)
 
 | Output column | ACS variable(s) | Notes |
 |---|---|---|
@@ -52,7 +52,7 @@ and presentation layer.
 | `poverty_rate` | B17001_002E / B17001_001E | % population below poverty line |
 | `unemployment_rate` | B23025_005E / B23025_003E | % civilian labor force unemployed |
 
-### EPA AQS variables (annual summary, 2022)
+### EPA AQS variables (annual summary, 2025)
 
 | Output column | Meaning |
 |---|---|
@@ -65,13 +65,23 @@ and presentation layer.
 | `pm25_monitor_count` | Number of monitors — counties with 0 have no PM2.5 data |
 | Same columns for `ozone_*` | Ozone standard: 0.070 ppm (EPA 8-hour standard) |
 
+### FBI Crime variables (2025)
+
+| Output column | Meaning |
+|---|---|
+| `violent_crime_rate` | Violent crimes per 100,000 people (annual average of monthly rates) |
+| `property_crime_rate` | Property crimes per 100,000 people |
+| `violent_crime_count` | Raw annual violent crime count |
+| `property_crime_count` | Raw annual property crime count |
+| `data_available` | False if the agency did not report data for 2025 |
+
 ---
 
 ## Data Quality & Known Limitations
 
 ### Census ACS margins of error
-ACS 5-year estimates carry margins of error, especially for small counties.
-The pipeline pulls point estimates only. For counties with population < 10,000,
+ACS 5-year estimates carry margins of error, especially for small places.
+The pipeline pulls point estimates only. For places with population < 10,000,
 treat derived rates with caution.
 
 ### EPA air quality monitor coverage
@@ -81,24 +91,24 @@ column makes coverage gaps explicit. The EPA annual standard (9 μg/m³) is used
 the reference; the WHO guideline is stricter at 5 μg/m³.
 
 ### FBI crime coverage gaps
-The FBI Crime Data Explorer collects data voluntarily from state and local agencies.
-Coverage is **incomplete**: not all agencies report, some report partial years,
-and data is keyed to police jurisdiction (ORI), not county.
-- The pipeline documents which counties have **no agency data**, which have
-  **partial coverage**, and which appear **fully covered**.
-- Missing counties are **flagged** rather than silently dropped.
+The FBI Crime Data Explorer collects data voluntarily from local agencies.
+Not all agencies report, and some report partial years. City names are parsed
+from agency names (e.g. "Los Angeles Police Department" → "Los Angeles") and
+matched to Census places — unmatched agencies are flagged with a null `place_fips`
+rather than silently dropped. Very small cities (population < ~1,000) may show
+extreme per-100k rates that are statistically unreliable.
 
 ---
 
 ## Running the Pipeline
 
-All three data sources publish annual updates. Run the pipeline once per year
-when new vintages are released (Census ACS in December, EPA AQS mid-year, FBI annually).
-Update `ACS_YEAR` in `src/config.py` to match the new vintage before running.
+All three sources publish annual updates. Run once per year when new vintages drop
+(Census ACS in December, EPA AQS mid-year, FBI annually).
+Update `ACS_YEAR` and `AQS_YEAR` in `src/config.py` before re-running.
 
 ```bash
 # 1. Clone and set up environment
-git clone <repo-url>
+git clone https://github.com/leonardoalva98/county-relocation-dashboard
 cd county-relocation-dashboard
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -108,11 +118,11 @@ cp .env.example .env
 # Edit .env with your keys
 
 # 3. Run each ingest module
-python3 src/ingest_census.py    # → data/processed/census.csv  (~3,200 counties)
-python3 src/ingest_air.py       # → data/processed/air.csv     (~1,500 counties with monitors)
-python3 src/ingest_crime.py     # → data/processed/crime.csv   (coverage varies)
+python3 src/ingest_census.py    # → data/processed/census.csv  (~32,000 cities)
+python3 src/ingest_air.py       # → data/processed/air.csv     (~850 counties with monitors)
+python3 src/ingest_crime.py     # → data/processed/crime.csv   (~8,000 city agencies)
 
-# 4. Load the three CSVs into Power BI and link on the fips column
+# 4. Load the three CSVs into Power BI and link census + crime on place_fips
 ```
 
 ---
@@ -121,7 +131,7 @@ python3 src/ingest_crime.py     # → data/processed/crime.csv   (coverage varie
 
 | Phase | Status |
 |-------|--------|
-| Phase 1 — Repo scaffold + Census ingest (single state) | ✅ Complete |
-| Phase 2 — Census all states + EPA air quality | ✅ Complete |
-| Phase 3 — FBI crime ingest + gap handling | ⬜ In progress |
+| Phase 1 — Repo scaffold + Census ingest | ✅ Complete |
+| Phase 2 — Census all cities + EPA air quality (all counties) | ✅ Complete |
+| Phase 3 — FBI crime ingest (all states) | 🔄 Running |
 | Power BI dashboard | ⬜ Pending |
