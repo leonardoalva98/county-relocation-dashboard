@@ -91,11 +91,19 @@ def fetch_agencies(state_abbr: str, api_key: str) -> list[dict]:
     cache = RAW_DIR / f"crime_agencies_{state_abbr}.json"
     if cache.exists():
         return pd.read_json(cache).to_dict(orient="records")
-    resp = requests.get(
-        f"{FBI_BASE}/agency/byStateAbbr/{state_abbr}",
-        params={"API_KEY": api_key}, timeout=30,
-    )
-    resp.raise_for_status()
+    for attempt in range(3):
+        try:
+            resp = requests.get(
+                f"{FBI_BASE}/agency/byStateAbbr/{state_abbr}",
+                params={"API_KEY": api_key}, timeout=120,
+            )
+            resp.raise_for_status()
+            break
+        except Exception as e:
+            if attempt == 2:
+                print(f"  WARNING: could not fetch agencies for {state_abbr}: {e}")
+                return []
+            time.sleep(5)
     data     = resp.json()
     agencies = [a for county in data.values() for a in county
                 if a.get("agency_type_name") == "City"]
@@ -104,18 +112,24 @@ def fetch_agencies(state_abbr: str, api_key: str) -> list[dict]:
 
 
 def fetch_offense(ori: str, offense: str, api_key: str) -> dict:
-    resp = requests.get(
-        f"{FBI_BASE}/summarized/agency/{ori}/{offense}",
-        params={
-            "from": f"01-{CRIME_YEAR}",
-            "to":   f"12-{CRIME_YEAR}",
-            "API_KEY": api_key,
-        },
-        timeout=120,
-    )
-    if resp.status_code != 200:
-        return {}
-    return resp.json()
+    for attempt in range(3):
+        try:
+            resp = requests.get(
+                f"{FBI_BASE}/summarized/agency/{ori}/{offense}",
+                params={
+                    "from": f"01-{CRIME_YEAR}",
+                    "to":   f"12-{CRIME_YEAR}",
+                    "API_KEY": api_key,
+                },
+                timeout=120,
+            )
+            if resp.status_code != 200:
+                return {}
+            return resp.json()
+        except Exception:
+            if attempt == 2:
+                return {}
+            time.sleep(5)
 
 
 def annual_rate(data: dict, agency_name: str) -> float | None:
